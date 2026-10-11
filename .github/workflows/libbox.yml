@@ -1,0 +1,46 @@
+name: libbox
+# Builds sing-box's Libbox.xcframework (ios-arm64 + ios-arm64-simulator) from an upstream tag with a reduced
+# feature set for a small, low-memory iOS packet tunnel (no Tailscale / OpenVPN / OpenConnect / naive / USB-IP),
+# and publishes it as a release asset Libbox.xcframework.zip (+ .sha256). Mirrors upstream build.yml's
+# build_apple_library job (Go 1.26.8, the iOS CPU-features Go patch, gomobile from `make lib_install`).
+on:
+  workflow_dispatch:
+    inputs:
+      version: { description: "sing-box version (tag without v)", default: "1.14.3" }
+      revision: { description: "release suffix, bump to rebuild the same version", default: "1" }
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+      TAGS: with_gvisor,with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,grpcnotrace
+    steps:
+      - name: Checkout sing-box
+        run: git clone --depth 1 -b "v$VERSION" https://github.com/SagerNet/sing-box.git sb
+      - uses: actions/setup-go@v5
+        with: { go-version: 1.26.8, cache: false }
+      - name: Patch Go for iOS
+        run: cd sb && .github/patch_go_for_ios.sh
+      - name: Build
+        env: { GOTOOLCHAIN: local }
+        run: |
+          cd sb
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          gomobile bind -v -target ios,iossimulator -libname=box -tags-not-macos=with_low_memory -iosversion=15.0 \
+            -trimpath -buildvcs=false \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=$VERSION -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid=" \
+            -tags "$TAGS" ./experimental/libbox
+          ls Libbox.xcframework
+          ditto -c -k --keepParent Libbox.xcframework ../Libbox.xcframework.zip
+          cd .. && shasum -a 256 Libbox.xcframework.zip | tee Libbox.xcframework.zip.sha256
+          du -sh sb/Libbox.xcframework/*
+      - name: Release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          T="v$VERSION-r${{ inputs.revision }}"
+          gh release create "$T" Libbox.xcframework.zip Libbox.xcframework.zip.sha256 -R "$GITHUB_REPOSITORY" \
+            --title "Libbox $VERSION (r${{ inputs.revision }})" --notes "sing-box v$VERSION libbox, tags: $TAGS (+ with_low_memory on iOS). Built by .github/workflows/libbox.yml."
+permissions:
+  contents: write
